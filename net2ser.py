@@ -7,6 +7,7 @@ import re
 import socket
 import binascii
 from scanf import scanf
+from attr.validators import instance_of
 
 
 def ser_select():
@@ -58,6 +59,12 @@ def put(text,color):
     sys.stdout.write(text);
     sys.stdout.write('\033[0m');
         
+class Init:
+    k = None
+    v = None
+    init_fun = None
+    def __init__(self,init_fun):
+        self.init_fun = init_fun
       
 class Config:
     k = None
@@ -67,6 +74,15 @@ class Config:
         self.v = value
         
 class Rule:
+    k = None
+    v = None
+    p = None
+    def __init__(self,key,value,process=None):
+        self.k = key
+        self.v = value
+        self.p = process
+
+class ConnectRule:
     k = None
     v = None
     p = None
@@ -133,7 +149,7 @@ def do_socket_close(param):
     param['net_connect_flag_str'] = '' if param['sock_state']==0 else param['net_connect_flag_str']
     return True
 
-def do_socket_send(param):
+def do_socket_send_asc(param):
     global sock_dict
     sock_id = param['sock_id']
     try:
@@ -149,7 +165,7 @@ def do_socket_send(param):
         param['at_return'] = 'ERROR'
     return True
 
-def do_socket_recv(param):
+def do_socket_recv_asc(param):
     for i in sock_dict.keys():
         sock = sock_dict[i]
         try:
@@ -183,13 +199,20 @@ param['recv_dat_bin'] = ''
 param['recv_dat_asc'] = ''
 param['recv_len'] = 0
 param['at_return'] = 'OK'
+param['apn'] = ''
+param['user'] = ''
+param['passwd'] = ''
+
 
 #############################################################################################
-param['imei'] = '123456789012345'   #imei
-param['ismi'] = '123456789012345'   #sim no
-param['force_rm_ip'] = '180.89.58.27'
-param['force_rm_port'] = 9020
+def mg3732_init():
+    param['imei'] = '123456789012345'   #imei
+    param['ismi'] = '123456789012345'   #sim no
+    param['force_rm_ip'] = '180.89.58.27'
+    param['force_rm_port'] = 9020
 mg3732_module = (
+    Init(mg3732_init),
+    
     Config('rule_name',                       'mg3732(wcdma)'),
     Config('at_endline',                      '\r\n'),
     Config('init_max_framsize',               4096),
@@ -209,16 +232,47 @@ mg3732_module = (
                                                                     do_socket_connect),
     Rule(('AT+ZIPCLOSE=%d','sock_id'),      'OK',                   do_socket_close),
     Rule(('AT+ZIPSEND=%d,%s','sock_id','send_dat_asc'),
-                                            ('%s','at_return'),     do_socket_send),
+                                            ('%s','at_return'),     do_socket_send_asc),
     
     Rule(None,   ('+ZIPRECV: %d,%s,%d,%i,%s','sock_id','rm_ip','rm_port','recv_len','recv_dat_asc'),
-                                                                    do_socket_recv),
+                                                                    do_socket_recv_asc),
     )
 
+#############################################################################################\
+def me3630_c1b_init():
+    param['force_rm_ip'] = '180.89.58.27'
+    param['force_rm_port'] = 904
+me3630_c1b_module = (
+    Init(me3630_c1b_init),
+    
+    Config('rule_name',                       'me3630_c1b(4g)'),
+    Config('at_endline',                      '\r\n'),
+    Config('init_max_framsize',               4096),
+    Config('init_serial_baudrate',            115200),
+    Config('init_serial_datafram_timeout',    0.5),#5k byte datafram @115kbps
+    Config('init_serial_databyte_timeout',    0.001), 
+    
+    Rule('ATE0',                            'OK'),
+    Rule('AT',                              'OK'),
+    Rule('AT+CPIN?',                        '+CPIN: READY'),
+    Rule('AT+CSQ',            				'+CSQ: 29,0'),
+    Rule('AT+CREG?',                         '+CREG: 0,1'),
+    Rule('AT+ZPAS?',                    	'CS_PS'),
+	Rule('AT$MYNETINFO=1',					'OK'),
+	Rule(('AT$MYNETCON=0,"APN","%s"','apn'),'OK'),
+	Rule('AT$MYNETCON=0,"USERPWD",","',		'OK'),
+	Rule(('AT$MYNETCON=0,"USERPWD","%s,"','user'),'OK'),
+	Rule(('AT$MYNETCON=0,"USERPWD",",%s"','passwd'),'OK'),
+	Rule(('AT$MYNETCON=0,"USERPWD","%s,%s"','user','passwd'),'OK'),
+	Rule('AT$MYNETACT=0,1',					('$MYURCACT: 0,1,"%s"','local_ip')),
+	ConnectRule(('AT$MYNETCREATE=0,0,%i,"%s",%i,%i','sock_id','rm_ip','rm_port','local_port'),
+											'CONNECT'),
+    )
 
 
 modules = (
     mg3732_module,
+	me3630_c1b_module,
     )
 
 if __name__ == '__main__':
@@ -233,6 +287,7 @@ if __name__ == '__main__':
         input = sys.stdin.readline().strip()
         idx = int(input) if input.isdigit() else -1
     module = tuple(modules[idx])
+    module[0].init_fun()
     
     #select a serial
     port = ser_select()
@@ -254,9 +309,9 @@ if __name__ == '__main__':
             put(frame,'white')
             frame = frame.strip()
             for item in module:
-                if(isinstance(item, Config)):
+                if(isinstance(item, Init) or isinstance(item, Config)):
                     continue
-                if(isinstance(item, Rule)):
+                if(isinstance(item, Rule) or isinstance(item, ConnectRule)):
                     key = item.k
                     value = item.v
                     tx=''
@@ -274,10 +329,11 @@ if __name__ == '__main__':
                         continue
         else:
             for item in module:
-                if(item.k==None):
+                if(not isinstance(item, Init) and item.k==None):
                     rule = item
 
         if(rule!=None):
+            is_send = False;
             value = rule.v
             if rule.p!=None:
                 res = rule.p(param)
@@ -285,6 +341,7 @@ if __name__ == '__main__':
             if(isinstance(value, str)):
                 tx = value + at_endline
                 ser.write(tx)
+                is_send = True
             elif(isinstance(value, tuple)):
                 plist = list(value[1:])
                 for i in range(len(plist)):
@@ -295,8 +352,28 @@ if __name__ == '__main__':
                         exit(-1)
                 tx = value[0]%tuple(plist) + at_endline
                 ser.write(tx)
+                is_send = True
             else:
                 continue
+            #into directly mode
+            if(is_send and isinstance(rule, ConnectRule)):
+                do_socket_connect(param)
+                sock_id = param['sock_id']
+                sock = sock_dict[sock_id]
+                while True:
+                    tx = ser.read(max_framsize)
+                    if(tx=='+++'):
+                        break
+                    sock.send(tx)
+                    put(binascii.b2a_hex(tx)+'\r\n','white')
+                    try:
+                        rx = sock.recv(4096)
+                        ser.write(rx)
+                        put(binascii.b2a_hex(rx)+'\r\n','green')
+                    except:
+                        continue
+                do_socket_close(param)
+                    
             #put('---['+tx+']---','green')
             put(tx,'green')
                 
